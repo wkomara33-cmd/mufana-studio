@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useMemo, useRef } from "react";
+import * as XLSX from "xlsx";
 import { supabase, isSupabaseConfigured, Barang, User } from "@/src/lib/supabase";
 
 export default function HomePage() {
@@ -23,6 +24,7 @@ export default function HomePage() {
   const [actionLoading, setActionLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+  const [exportLoading, setExportLoading] = useState(false);
 
   // Layout mode: "katalog" (grid kartu studio) atau "tabel" (tabel)
   const [viewMode, setViewMode] = useState<"katalog" | "tabel">("katalog");
@@ -526,6 +528,165 @@ export default function HomePage() {
     }
   };
 
+  // Export seluruh data barang ke Excel (.xlsx)
+  const handleExportExcel = async () => {
+    if (exportLoading) return;
+
+    if (!isSupabaseConfigured) {
+      setErrorMessage("Konfigurasi Supabase belum disetel di file .env.local");
+      return;
+    }
+
+    try {
+      setExportLoading(true);
+      setErrorMessage(null);
+
+      // Ambil seluruh data barang dari Supabase, urutkan berdasarkan nama
+      const { data, error } = await supabase
+        .from("barang")
+        .select("*")
+        .order("nama", { ascending: true });
+
+      if (error) {
+        throw error;
+      }
+
+      if (!data || data.length === 0) {
+        setErrorMessage("Tidak ada data barang untuk diekspor ke Excel.");
+        return;
+      }
+
+      // Hitung total stok dan total nilai stok
+      let totalStok = 0;
+      let totalNilaiStok = 0;
+
+      // Susun baris data: No, Nama Barang, Harga, Stok, Nilai Stok (harga x stok)
+      const rows = data.map((item, index) => {
+        const harga = Number(item.harga) || 0;
+        const stok = Number(item.stok) || 0;
+        const nilaiStok = harga * stok;
+
+        totalStok += stok;
+        totalNilaiStok += nilaiStok;
+
+        return [
+          index + 1,
+          item.nama || "-",
+          harga,
+          stok,
+          nilaiStok,
+        ];
+      });
+
+      // Header kolom
+      const header = ["No", "Nama Barang", "Harga", "Stok", "Nilai Stok"];
+
+      // Baris TOTAL di bawah
+      const totalRow = [
+        "",
+        "TOTAL",
+        "",
+        totalStok,
+        totalNilaiStok,
+      ];
+
+      const worksheetData = [header, ...rows, totalRow];
+
+      // Konversi ke worksheet SheetJS
+      const worksheet = XLSX.utils.aoa_to_sheet(worksheetData);
+
+      const totalRowIdx = worksheetData.length; // 1-indexed
+
+      // Format sel data: Harga (kolom C), Stok (kolom D), Nilai Stok (kolom E)
+      // Disimpan sebagai angka dengan format ribuan
+      for (let r = 2; r <= data.length + 1; r++) {
+        // Harga
+        const cellC = worksheet[`C${r}`];
+        if (cellC) {
+          cellC.t = "n";
+          cellC.z = "#,##0";
+        }
+
+        // Stok
+        const cellD = worksheet[`D${r}`];
+        if (cellD) {
+          cellD.t = "n";
+          cellD.z = "#,##0";
+        }
+
+        // Nilai Stok
+        const cellE = worksheet[`E${r}`];
+        if (cellE) {
+          cellE.t = "n";
+          cellE.z = "#,##0";
+        }
+      }
+
+      // Format sel baris TOTAL
+      const totalCellB = worksheet[`B${totalRowIdx}`];
+      if (totalCellB) {
+        totalCellB.s = { font: { bold: true }, alignment: { horizontal: "right" } };
+      }
+
+      const totalCellD = worksheet[`D${totalRowIdx}`];
+      if (totalCellD) {
+        totalCellD.t = "n";
+        totalCellD.z = "#,##0";
+        totalCellD.s = { font: { bold: true } };
+      }
+
+      const totalCellE = worksheet[`E${totalRowIdx}`];
+      if (totalCellE) {
+        totalCellE.t = "n";
+        totalCellE.z = "#,##0";
+        totalCellE.s = { font: { bold: true } };
+      }
+
+      // Beri header tebal
+      ["A1", "B1", "C1", "D1", "E1"].forEach((ref) => {
+        if (worksheet[ref]) {
+          worksheet[ref].s = {
+            font: { bold: true },
+          };
+        }
+      });
+
+      // Lebarkan kolom agar rapi
+      worksheet["!cols"] = [
+        { wch: 6 },  // No
+        { wch: 35 }, // Nama Barang
+        { wch: 18 }, // Harga
+        { wch: 12 }, // Stok
+        { wch: 22 }, // Nilai Stok
+      ];
+
+      // Buat workbook dan sheet
+      const workbook = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(workbook, worksheet, "Data Stok");
+
+      // Nama file: stok-mufana-YYYY-MM-DD.xlsx
+      const now = new Date();
+      const year = now.getFullYear();
+      const month = String(now.getMonth() + 1).padStart(2, "0");
+      const day = String(now.getDate()).padStart(2, "0");
+      const fileName = `stok-mufana-${year}-${month}-${day}.xlsx`;
+
+      // Download file di sisi browser
+      XLSX.writeFile(workbook, fileName);
+
+      showSuccess(`File "${fileName}" berhasil diekspor!`);
+    } catch (err: unknown) {
+      const error = err as { message?: string };
+      setErrorMessage(
+        error?.message
+          ? `Gagal mengekspor data ke Excel: ${error.message}`
+          : "Gagal mengekspor data ke Excel. Silakan periksa koneksi Anda."
+      );
+    } finally {
+      setExportLoading(false);
+    }
+  };
+
   // Layar Tunggu saat Cek LocalStorage
   if (authChecking) {
     return (
@@ -884,43 +1045,73 @@ export default function HomePage() {
           </div>
         )}
 
-        {/* Toolbar: Bar Pencarian, Toggle View & Info */}
-        <div className="mb-6 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          {/* Kolom Pencarian */}
-          <div className="relative flex-1 max-w-md">
-            <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3.5">
-              <svg
-                xmlns="http://www.w3.org/2000/svg"
-                className="h-5 w-5 text-[#A89F91]"
-                fill="none"
-                viewBox="0 0 24 24"
-                stroke="currentColor"
-                strokeWidth={2}
-              >
-                <path
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                  d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
-                />
-              </svg>
-            </div>
-            <input
-              type="text"
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder="Cari koleksi produk studio..."
-              className="block min-h-[44px] w-full rounded-2xl border border-[#EADBCE] bg-white py-2.5 pl-11 pr-9 text-sm text-[#3E2723] placeholder-[#A89F91] shadow-2xs transition-all focus:border-[#74512D] focus:outline-none focus:ring-2 focus:ring-[#74512D]/20"
-            />
-            {searchQuery && (
-              <button
-                onClick={() => setSearchQuery("")}
-                className="absolute inset-y-0 right-0 flex items-center pr-3 text-[#A89F91] hover:text-[#543310]"
-              >
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                  <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+        {/* Toolbar: Bar Pencarian, Tombol Export Excel, Toggle View & Info */}
+        <div className="mb-6 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5 flex-1 max-w-xl">
+            {/* Kolom Pencarian */}
+            <div className="relative flex-1">
+              <div className="pointer-events-none absolute inset-y-0 left-0 flex items-center pl-3.5">
+                <svg
+                  xmlns="http://www.w3.org/2000/svg"
+                  className="h-5 w-5 text-[#A89F91]"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"
+                  />
                 </svg>
-              </button>
-            )}
+              </div>
+              <input
+                type="text"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Cari koleksi produk studio..."
+                className="block min-h-[46px] w-full rounded-2xl border border-[#EADBCE] bg-white py-2.5 pl-11 pr-9 text-sm text-[#3E2723] placeholder-[#A89F91] shadow-2xs transition-all focus:border-[#74512D] focus:outline-none focus:ring-2 focus:ring-[#74512D]/20"
+              />
+              {searchQuery && (
+                <button
+                  onClick={() => setSearchQuery("")}
+                  className="absolute inset-y-0 right-0 flex items-center pr-3 text-[#A89F91] hover:text-[#543310]"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                  </svg>
+                </button>
+              )}
+            </div>
+
+            {/* Tombol Export Excel (Ukuran pas dan nyaman untuk HP & Desktop) */}
+            <button
+              type="button"
+              onClick={handleExportExcel}
+              disabled={exportLoading}
+              className="inline-flex min-h-[46px] items-center justify-center gap-2 rounded-2xl border border-emerald-700/20 bg-emerald-700 px-4 py-2.5 text-sm font-bold text-white shadow-sm shadow-emerald-900/10 transition-all hover:bg-emerald-800 active:scale-[0.98] disabled:opacity-60 disabled:cursor-not-allowed shrink-0 w-full sm:w-auto"
+              title="Ekspor seluruh data barang ke file Excel (.xlsx)"
+            >
+              {exportLoading ? (
+                <>
+                  <div className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                  <span>Memproses...</span>
+                </>
+              ) : (
+                <>
+                  <svg
+                    xmlns="http://www.w3.org/2000/svg"
+                    className="h-5 w-5 text-emerald-200"
+                    viewBox="0 0 24 24"
+                    fill="currentColor"
+                  >
+                    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8l-6-6zm1.8 14.5l-1.4-2.3 1.3-2.2h-1.4l-.6 1.3-.6-1.3h-1.4l1.3 2.2-1.4 2.3h1.4l.7-1.4.7 1.4h1.4zM13 9V3.5L18.5 9H13z" />
+                  </svg>
+                  <span>Export Excel</span>
+                </>
+              )}
+            </button>
           </div>
 
           {/* Opsi Tampilan & Statistik */}
